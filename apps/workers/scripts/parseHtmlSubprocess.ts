@@ -1,10 +1,8 @@
 import { readFile } from "node:fs/promises";
 
-import { Readability } from "@mozilla/readability";
-import DOMPurify from "dompurify";
 import { HttpProxyAgent } from "http-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
-import { JSDOM, VirtualConsole } from "jsdom";
+import { JSDOM } from "jsdom";
 import metascraper from "metascraper";
 import metascraperAmazon from "metascraper-amazon";
 import metascraperAuthor from "metascraper-author";
@@ -30,11 +28,12 @@ import {
   parseSubprocessInputSchema,
   parseSubprocessOutputSchema,
 } from "../workers/utils/parseHtmlSubprocessIpc";
+import { assessReaderView } from "../workers/utils/readerViewAssessment";
+import type { ReaderViewAssessment } from "../workers/utils/readerViewAssessment";
 import {
-  assessReaderView,
-  ReaderViewAssessment,
-  unavailableReaderViewAssessment,
-} from "../workers/utils/readerViewAssessment";
+  extractReadableContent,
+  sanitizeMediaContent,
+} from "../workers/utils/readerContent";
 
 // Redirect all log output to stderr so it doesn't interfere with the JSON protocol on stdout.
 logger.clear();
@@ -69,113 +68,6 @@ const metascraperParser = metascraper([
   metascraperSafeFavicon(),
   metascraperUrl(),
 ]);
-
-/**
- * Many sites use custom data-* attributes for lazy loading images instead of the
- * standard `src` attribute (e.g. WeChat's data-src, data-actualsrc, data-srv, or
- * the common data-original / data-lazy patterns used by jQuery plugins).
- *
- * Readability and DOMPurify both operate on the DOM, so images with no `src` are
- * either ignored or their placeholders are stripped.  We normalise these attributes
- * to `src` *before* passing the document to Readability so that the extracted
- * article retains the actual image URLs.
- */
-const LAZY_SRC_ATTRS = [
-  "data-src",
-  "data-actualsrc",
-  "data-srv",
-  "data-original",
-  "data-lazy",
-  "data-lazyload",
-  "data-img-src",
-  "data-url",
-];
-
-function isPlaceholderDataImage(src: string): boolean {
-  // Tiny data-URI images are commonly used as lazy-load placeholders. Do not
-  // treat every data:image/gif as a placeholder: SingleFile and some sites
-  // inline real GIF assets as data URIs, and replacing those with a lazy
-  // attribute URL makes the saved reader content depend on the remote image.
-  // 200 chars is a deliberately generous cutoff: a 1x1 transparent GIF/PNG
-  // placeholder is only ~60-100 chars, while a real inlined image is many KB,
-  // so anything under this limit is safely a placeholder rather than an asset.
-  const PLACEHOLDER_MAX_LENGTH = 200;
-  const normalizedSrc = src.replace(/\s/g, "").toLowerCase();
-  return (
-    normalizedSrc.length <= PLACEHOLDER_MAX_LENGTH &&
-    (normalizedSrc.startsWith("data:image/gif") ||
-      normalizedSrc.startsWith("data:image/png"))
-  );
-}
-
-function normalizeLazyLoadImages(document: Document): void {
-  const images = document.querySelectorAll("img");
-  for (const img of images) {
-    // Only fill in src if it is absent or a known tiny placeholder. Real
-    // inlined GIF/PNG data URIs must be preserved so archived content keeps
-    // the saved image rather than falling back to a remote lazy-load URL.
-    const currentSrc = img.getAttribute("src") ?? "";
-    const needsSrc =
-      !currentSrc || currentSrc === "#" || isPlaceholderDataImage(currentSrc);
-
-    if (!needsSrc) {
-      continue;
-    }
-
-    for (const attr of LAZY_SRC_ATTRS) {
-      const value = img.getAttribute(attr);
-      if (value && value.trim() && !value.startsWith("data:")) {
-        img.setAttribute("src", value.trim());
-        break;
-      }
-    }
-  }
-}
-
-function extractReadableContent(
-  htmlContent: string,
-  url: string,
-): {
-  readableContent: { content: string } | null;
-  readerViewAssessment: ReaderViewAssessment;
-} {
-  const virtualConsole = new VirtualConsole();
-  const dom = new JSDOM(htmlContent, { url, virtualConsole });
-  try {
-    normalizeLazyLoadImages(dom.window.document);
-    const documentClone = dom.window.document.cloneNode(true) as Document;
-    const readableContent = new Readability(documentClone).parse();
-    if (!readableContent || typeof readableContent.content !== "string") {
-      return {
-        readableContent: null,
-        readerViewAssessment: unavailableReaderViewAssessment(),
-      };
-    }
-
-    const purifyWindow = new JSDOM("").window;
-    try {
-      const purify = DOMPurify(purifyWindow);
-      const purifiedHTML = purify.sanitize(readableContent.content);
-      const extractedDom = new JSDOM(purifiedHTML, { url, virtualConsole });
-      try {
-        return {
-          readableContent: { content: purifiedHTML },
-          readerViewAssessment: assessReaderView(
-            dom.window.document,
-            extractedDom.window.document,
-            url,
-          ),
-        };
-      } finally {
-        extractedDom.window.close();
-      }
-    } finally {
-      purifyWindow.close();
-    }
-  } finally {
-    dom.window.close();
-  }
-}
 
 const EMBEDDED_MEDIA_DATA_URI_PATTERN = /data:(?:audio|video)\/[^"'\s<>)]*/gi;
 
@@ -250,12 +142,13 @@ async function main() {
   if (!metadataOnly && meta.readableContentHtml) {
     // Sanitize plugin-provided HTML through DOMPurify (the extractReadableContent
     // path already does this, but the direct-content path was missing it).
-    const purifyWindow = new JSDOM("").window;
+    const sourceDom = new JSDOM(htmlContent, { url });
     try {
-      const purify = DOMPurify(purifyWindow);
-      const purifiedHTML = purify.sanitize(meta.readableContentHtml);
+      const purifiedHTML = sanitizeMediaContent(
+        meta.readableContentHtml,
+        sourceDom.window.document,
+      );
       readableContent = { content: purifiedHTML };
-      const sourceDom = new JSDOM(htmlContent, { url });
       const extractedDom = new JSDOM(purifiedHTML, { url });
       try {
         readerViewAssessment = assessReaderView(
@@ -264,11 +157,10 @@ async function main() {
           url,
         );
       } finally {
-        sourceDom.window.close();
         extractedDom.window.close();
       }
     } finally {
-      purifyWindow.close();
+      sourceDom.window.close();
     }
   }
 

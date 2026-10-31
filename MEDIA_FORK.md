@@ -1,46 +1,49 @@
-# Media preservation fork brief
+# Reader media preservation
 
-Goal: display article/post embedded images and videos in their original order,
-on web and mobile, including Anthropic, Substack and X. This checkout starts
-from upstream main on 2026-10-31; branch: media-preservation.
+Fork: https://github.com/simonnieder/karakeep, branch `media-preservation`.
 
-## Confirmed upstream gaps
+The reader parser now:
 
-- Substack JSON-wrapped image URLs: open issue #2972.
-  https://github.com/karakeep-app/karakeep/issues/2972
-- X media not downloaded: open issue #1331.
-  https://github.com/karakeep-app/karakeep/issues/1331
-- Embedded video handling: open issue #729.
-  https://github.com/karakeep-app/karakeep/issues/729
-- Reader image caching: approved, open issue #1563.
-  https://github.com/karakeep-app/karakeep/issues/1563
+- Keeps Anthropic article bodies intact, including figures and captions.
+- Decodes Substack `data-attrs` image and direct video URLs, including custom
+  publication domains, while preserving valid existing image sources.
+- Keeps native video/audio players in extracted articles, in their original
+  position, with controls and without autoplay. Relative URLs are resolved.
+- Preserves sandboxed YouTube, Vimeo and X player embeds. Other iframe providers
+  become links, rather than silently disappearing or running arbitrary scripts.
+- Selects the saved X post instead of its replies. Blob video sources and blocked
+  crawler pages fall back to X's live post player.
 
-## Small initial scope
+The web reader and mobile DOM reader already share the stored HTML renderer;
+no separate client player or database schema is needed. Re-crawl existing
+bookmarks to regenerate their reader content.
 
-1. Port the verified Anthropic figure preservation workaround from the local
-   running instance into source with a regression fixture.
-2. Decode Substack data-attrs JSON image sources before Readability, preserving
-   valid existing sources and handling malformed JSON safely.
-3. Add a media manifest before Readability drops media, associate retained media
-   with the correct post/article, and render it in document order on web/mobile.
-4. Handle native video/source elements and supported hosted-video providers.
-   X needs post-scoped extraction; the generic page includes unrelated replies.
-5. Use existing asset storage/video workers where possible. Distinguish remote
-   playable embeds from locally archived files; do not equate them.
+## Checks
 
-## Bounds
+Run the focused extraction and classifier tests:
 
-A fork alone does not implement these features. Universal video playback is
-not a small parser patch: extraction, rendering, authentication and browser
-format support all matter. Preserve sanitization and request validation;
-never enable arbitrary iframe/script execution to make embeds work.
-Paywalled/authenticated sources require the user's existing authorized access.
+```
+pnpm --filter @karakeep/workers exec vitest run workers/utils/readerContent.test.ts workers/utils/readerViewAssessment.test.ts
+```
 
-## Current state
+The regression cases cover article figures/captions, relative/responsive image
+URLs, malformed Substack JSON, real inline images, multiple videos in order,
+X post selection and blocked pages, supported/unsupported iframe providers,
+and stripping script URLs, event handlers and srcdoc. The original Anthropic
+article was also extracted successfully with all four figures and captions.
 
-Hosted fork: https://github.com/simonnieder/karakeep
+## Limits
 
-Branch: media-preservation. This branch currently records the investigated gaps
-and implementation scope; media extraction/player changes are not implemented.
-No new deployment.
-The existing Anthropic container workaround remains active separately.
+Images and videos remain remote resources, not an offline media archive.
+Protected, deleted or expired media may need authorized access or stop working.
+Browser codec support still applies. Custom JS players with no media source in
+the crawled HTML require a provider adapter; unsupported iframes retain a link.
+X's fallback embeds the whole live post, so its photos may also appear there.
+The shared HTML renderer is unchanged; actual iOS/Android playback needs device
+verification. No browser or mobile UI playback was verified in this change.
+
+Related upstream reports:
+- https://github.com/karakeep-app/karakeep/issues/2972 (Substack images)
+- https://github.com/karakeep-app/karakeep/issues/1331 (X media)
+- https://github.com/karakeep-app/karakeep/issues/729 (embedded videos)
+- https://github.com/karakeep-app/karakeep/issues/1563 (offline image caching)

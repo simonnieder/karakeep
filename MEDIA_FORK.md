@@ -38,6 +38,9 @@ Paywalled/authenticated sources require the user's existing authorized access.
 
 ## Current state
 
-Prepared local checkout only. No GitHub authentication is available in this
-session, so no hosted fork has been created or pushed. No new deployment.
+Hosted fork: https://github.com/simonnieder/karakeep
+
+Branch: media-preservation. This branch currently records the investigated gaps
+and implementation scope; media extraction/player changes are not implemented.
+No new deployment.
 The existing Anthropic container workaround remains active separately.
